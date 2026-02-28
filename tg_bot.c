@@ -101,15 +101,15 @@ void send_message(long long chat_id, const char *text, sqlite3 *db, const char *
 	// 执行请求
 	CURLcode res = curl_easy_perform(curl);
 	if (res != CURLE_OK) {
-		fprintf(stderr, "\n[ERROR] CURL perform failed in send_message: %s\n", curl_easy_strerror(res));
+		fprintf(stderr, "[ERROR] CURL perform failed in send_message: %s\n", curl_easy_strerror(res));
 	} else {
 		// 检查 HTTP 状态码
 		long http_code = 0;
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
 		if (http_code != 200) {
-			fprintf(stderr, "\n[ERROR] Telegram API returned HTTP %ld in send_message\n", http_code);
+			fprintf(stderr, "[ERROR] Telegram API returned HTTP %ld in send_message\n", http_code);
 		} else {
-			fprintf(stderr, "\n[INFO] Message sent successfully to chat_id %lld\n", chat_id);
+			fprintf(stderr, "[INFO] Message sent successfully to chat_id %lld\n", chat_id);
 		}
 	}
 	curl_easy_cleanup(curl);
