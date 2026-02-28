@@ -4,12 +4,12 @@
 #include <curl/curl.h>
 #include <cjson/cJSON.h>
 #include <sqlite3.h>
+#include <signal.h>
 
 #ifdef _WIN32
-#include <windows.h>  // 用于 Sleep on Windows
-#define sleep(ms) Sleep((ms) * 1000)  // Windows Sleep 是毫秒，兼容 Unix sleep(秒)
+#include <windows.h>
 #else
-#include <unistd.h>  // 用于 sleep on Unix-like
+#include <unistd.h>
 #endif
 
 #define API_BASE "https://api.telegram.org/bot"
@@ -20,6 +20,16 @@ typedef struct {
 	char *memory;
 	size_t size;
 } MemoryStruct;
+
+// 全局标志，用于退出循环
+volatile sig_atomic_t keep_running = 1;
+
+// 信号处理函数
+static void signal_handler(int sig) {
+	(void)sig;  // 防止编译器警告
+	keep_running = 0;
+	fprintf(stderr, "[INFO] Received signal, shutting down gracefully...\n");
+}
 
 // CURL 写回调函数：收集 HTTP 响应数据
 static size_t write_callback(void *contents, size_t size, size_t nmemb, void *userp) {
@@ -37,7 +47,7 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 	return realsize;
 }
 
-// 初始化 CURL 并设置通用选项，包括 CA 证书和代理日志
+// 初始化 CURL 并设置通用选项，包括 CA 证书
 CURL *init_curl_with_options() {
 	CURL *curl = curl_easy_init();
 	if (!curl) {
@@ -45,15 +55,16 @@ CURL *init_curl_with_options() {
 		return NULL;
 	}
 
-	// 处理 Windows 等环境的 CA 证书问题，从环境变量 CURL_CA_BUNDLE 读取路径
+	// 从环境变量 CURL_CA_BUNDLE 读取路径
 	const char *ca_path = getenv("CURL_CA_BUNDLE");
 	if (ca_path) {
 		curl_easy_setopt(curl, CURLOPT_CAINFO, ca_path);
 		fprintf(stderr, "[INFO] Using CA bundle from env: %s\n", ca_path);
 	} else {
 #ifdef _WIN32
-		fprintf(stderr, "[WARNING] No CURL_CA_BUNDLE set, may have SSL cert issues on Windows. Download cacert.pem and set env var.\n");
+		fprintf(stderr, "[WARNING] No CURL_CA_BUNDLE set, using default CA or may have SSL issues.\n");
 #endif
+		// 可选：禁用SSL验证
 		//curl_easy_setopt(curl, CURLOPT_SSL_VERIFYPEER, 0L);
 		//curl_easy_setopt(curl, CURLOPT_SSL_VERIFYHOST, 0L);
 	}
@@ -176,7 +187,7 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		fprintf(stderr, "[ERROR] Invalid chat_id in update\n");
 		return;
 	}
-	long long chat_id = (long long) (chat_id_item ? chat_id_item->valuedouble : 0);
+	long long chat_id = (long long)chat_id_item->valuedouble;
 
 	// 获取 from 和 user_id
 	cJSON *from = cJSON_GetObjectItem(message, "from");
@@ -186,7 +197,7 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		fprintf(stderr, "[ERROR] Invalid user_id in update\n");
 		return;
 	}
-	long long user_id = (long long) (user_id_item ? user_id_item->valuedouble : 0);
+	long long user_id = (long long)user_id_item->valuedouble;
 
 	// 获取 username 和 text
 	cJSON *username_item = cJSON_GetObjectItem(from, "username");
@@ -223,33 +234,61 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		snprintf(info, sizeof(info), "Your ID: %lld\nYour Username: %s", user_id, username);
 		send_message(chat_id, info, db, token);
 	} else if (strncmp(text, "/curl ", 6) == 0) {
+		// 改进：使用 getopt 解析选项，支持组合如 -46, -i6
 		char *args = strdup(text + 6);
 		if (!args) {
 			fprintf(stderr, "[ERROR] strdup failed in /curl\n");
 			return;
 		}
-		char *url = strtok(args, " ");
+
 		int ipv4 = 0, ipv6 = 0, include_headers = 0;
+		char *url = NULL;
 
-		char *option;
-		while ((option = strtok(NULL, " "))) {
-			if (strcmp(option, "-4") == 0) ipv4 = 1;
-			else if (strcmp(option, "-6") == 0) ipv6 = 1;
-			else if (strcmp(option, "-i") == 0) include_headers = 1;
-		}
-
-		if (url) {
-			char *response = perform_curl(url, ipv4, ipv6, include_headers);
-			// 截断响应如果太长（Telegram 消息限 4096 字符）
-			if (strlen(response) > 4000) {
-				response[4000] = '\0';
-				strcat(response, "... (truncated)");
+		// TODO: 在Linux使用 getopt 解析
+		char *ptr = args;
+		while (*ptr) {
+			if (*ptr == ' ') {
+				ptr++;
+				continue;
 			}
-			send_message(chat_id, response, db, token);
-			free(response);
-		} else {
-			send_message(chat_id, "Usage: /curl https://example.com [-4|-6|-i]", db, token);
+			if (*ptr == '-') {
+				ptr++;
+				while (*ptr && *ptr != ' ') {
+					if (*ptr == '4') ipv4 = 1;
+					else if (*ptr == '6') ipv6 = 1;
+					else if (*ptr == 'i') include_headers = 1;
+					else {
+						send_message(chat_id, "Invalid option! Usage: /curl https://example.com [-4] [-6] [-i]", db, token);
+						free(args);
+						return;
+					}
+					ptr++;
+				}
+			} else {
+				// 剩余部分作为URL
+				url = ptr;
+				while (*ptr) ptr++;  // 跳到末尾
+			}
 		}
+
+		if (!url || strlen(url) == 0) {
+			send_message(chat_id, "Usage: /curl https://example.com [-4] [-6] [-i]", db, token);
+			free(args);
+			return;
+		}
+
+		// 截断URL后的空格（如果有）
+		char *end = url + strlen(url) - 1;
+		while (end > url && *end == ' ') *end-- = '\0';
+
+		char *response = perform_curl(url, ipv4, ipv6, include_headers);
+		// 截断响应如果太长（Telegram 消息限 4096 字符）
+		if (strlen(response) > 4000) {
+			response[4000] = '\0';
+			strcat(response, "... (truncated)");
+		}
+		send_message(chat_id, response, db, token);
+		free(response);
 		free(args);
 	}
 }
@@ -281,12 +320,20 @@ int main() {
 		fprintf(stderr, "[INFO] Messages table ready\n");
 	}
 
+	// 设置信号处理：优雅退出
+	signal(SIGINT, signal_handler);
+	signal(SIGTERM, signal_handler);
+
 	// 长轮询循环
 	long long offset = 0;
-	while (1) {
+	while (keep_running) {
 		CURL *curl = init_curl_with_options();
 		if (!curl) {
+#ifdef _WIN32
+			Sleep(2000);
+#else
 			sleep(2);
+#endif
 			continue;
 		}
 
@@ -294,7 +341,11 @@ int main() {
 		if (!chunk.memory) {
 			fprintf(stderr, "[ERROR] Failed to malloc in main loop\n");
 			curl_easy_cleanup(curl);
+#ifdef _WIN32
+			Sleep(2000);
+#else
 			sleep(2);
+#endif
 			continue;
 		}
 
@@ -326,7 +377,7 @@ int main() {
 							process_update(item, db, token);
 							cJSON *update_id_item = cJSON_GetObjectItem(item, "update_id");
 							if (update_id_item && cJSON_IsNumber(update_id_item)) {
-								long long update_id = (long long) update_id_item->valueint;
+								long long update_id = (long long)update_id_item->valueint;
 								if (update_id >= offset) offset = update_id + 1;
 							}
 						}
@@ -340,13 +391,17 @@ int main() {
 		free(chunk.memory);
 		curl_easy_cleanup(curl);
 
+		if (keep_running) {
 #ifdef _WIN32
-		Sleep((2) * 1000);
+			Sleep(2000);
 #else
-		sleep(2);
+			sleep(2);
 #endif
+		}
 	}
 
+	// 清理
 	sqlite3_close(db);
+	fprintf(stderr, "[INFO] Bot shutdown complete.\n");
 	return 0;
 }
