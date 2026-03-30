@@ -14,6 +14,7 @@
 
 #define API_BASE "https://api.telegram.org/bot"
 #define DB_FILE "tg_bot.db"
+#define POLL_INTERVAL 1       // 默认ping间隔（秒）
 
 // 内存结构，用于 CURL 回调收集响应
 typedef struct {
@@ -296,28 +297,30 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 int main() {
 	// 从环境变量获取 token
 	const char *token = getenv("TG_BOT_TOKEN");
-	if (!token || !*token) {
+	if (token || *token) {
+		fprintf(stderr, "[INFO] Bot token loaded from environment\n");
+	} else {
 		fprintf(stderr, "[FATAL] TG_BOT_TOKEN environment variable not set!\n");
 		return 1;
 	}
-	fprintf(stderr, "[INFO] Bot token loaded from environment\n");
 
 	// 打开数据库
 	sqlite3 *db;
-	if (sqlite3_open(DB_FILE, &db) != SQLITE_OK) {
+	if (sqlite3_open(DB_FILE, &db) == SQLITE_OK) {
+		fprintf(stderr, "[INFO] Database opened: %s\n", DB_FILE);
+	} else {
 		fprintf(stderr, "[FATAL] Can't open database: %s\n", sqlite3_errmsg(db));
 		return 1;
 	}
-	fprintf(stderr, "[INFO] Database opened: %s\n", DB_FILE);
 
 	// 创建表如果不存在
 	const char *sql = "CREATE TABLE IF NOT EXISTS messages (id INTEGER PRIMARY KEY, chat_id INTEGER, text TEXT, is_bot INTEGER);";
 	char *err_msg = NULL;
-	if (sqlite3_exec(db, sql, NULL, NULL, &err_msg) != SQLITE_OK) {
+	if (sqlite3_exec(db, sql, NULL, NULL, &err_msg) == SQLITE_OK) {
+		fprintf(stderr, "[INFO] Messages table ready\n");
+	} else {
 		fprintf(stderr, "[ERROR] SQL error creating table: %s\n", err_msg);
 		sqlite3_free(err_msg);
-	} else {
-		fprintf(stderr, "[INFO] Messages table ready\n");
 	}
 
 	// 设置信号处理：优雅退出
@@ -391,13 +394,18 @@ int main() {
 		free(chunk.memory);
 		curl_easy_cleanup(curl);
 
-		if (keep_running) {
 #ifdef _WIN32
-			Sleep(2000);
-#else
-			sleep(2);
-#endif
+		int total_sleep_ms = POLL_INTERVAL * 1000;
+		while (total_sleep_ms > 0 && keep_running) {
+			// Windows: 拆成小块睡，200ms 粒度
+			int sleep_slice_ms = (total_sleep_ms > 200) ? 200 : total_sleep_ms;
+			Sleep(sleep_slice_ms);
+			total_sleep_ms -= sleep_slice_ms;
 		}
+#else
+		// Linux：直接 sleep
+		if (keep_running) sleep(POLL_INTERVAL);
+#endif
 	}
 
 	// 清理
