@@ -273,7 +273,7 @@ int main() {
 #endif
 	// 从环境变量获取 token
 	const char *token = getenv("TG_BOT_TOKEN");
-	if (token || *token) {
+	if (token && *token) {
 		fprintf(stderr, "[INFO] Bot token loaded from environment\n");
 	} else {
 		fprintf(stderr, "[FATAL] TG_BOT_TOKEN environment variable not set!\n");
