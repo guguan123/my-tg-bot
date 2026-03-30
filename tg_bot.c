@@ -14,7 +14,8 @@
 
 #define API_BASE "https://api.telegram.org/bot"
 #define DB_FILE "tg_bot.db"
-#define POLL_INTERVAL 1       // 默认ping间隔（秒）
+#define POLL_INTERVAL 1       // 默认轮询间隔（秒）
+#define MY_USER_ID 6524442943
 
 // 内存结构，用于 CURL 回调收集响应
 typedef struct {
@@ -38,8 +39,9 @@ static size_t write_callback(void *contents, size_t size, size_t nmemb, void *us
 	MemoryStruct *mem = (MemoryStruct *)userp;
 	char *ptr = realloc(mem->memory, mem->size + realsize + 1);
 	if (ptr == NULL) {
+		// 内存分配失败
 		fprintf(stderr, "[ERROR] realloc failed in write_callback\n");
-		return 0;  // 内存分配失败，返回 0 表示错误
+		return 0;
 	}
 	mem->memory = ptr;
 	memcpy(&(mem->memory[mem->size]), contents, realsize);
@@ -83,36 +85,40 @@ void send_message(long long chat_id, const char *text, sqlite3 *db, const char *
 	snprintf(url, sizeof(url), "%s%s/sendMessage", API_BASE, token);
 	fprintf(stderr, "[INFO] Sending message to chat_id %lld: %s\n", chat_id, text);
 
-	// URL 编码 text，使用 libcurl 自带的 escape 函数
-	char *escaped_text = curl_easy_escape(curl, text, 0);
-	if (!escaped_text) {
-		fprintf(stderr, "[ERROR] Failed to escape text in send_message\n");
-		curl_easy_cleanup(curl);
-		return;
-	}
-
 	// 构建 POST fields
-	char postfields[1024];
-	snprintf(postfields, sizeof(postfields), "chat_id=%lld&text=%s", chat_id, escaped_text);
-	curl_free(escaped_text);  // 释放 escaped_text
+	curl_mime *mime = curl_mime_init(curl);
+    curl_mimepart *part;
 
+    // 添加 chat_id
+    part = curl_mime_addpart(mime);
+    curl_mime_name(part, "chat_id");
+    char chat_id_str[32];
+    snprintf(chat_id_str, sizeof(chat_id_str), "%lld", chat_id);
+    curl_mime_data(part, chat_id_str, CURL_ZERO_TERMINATED);
+
+    // 添加 text
+    part = curl_mime_addpart(mime);
+    curl_mime_name(part, "text");
+    curl_mime_data(part, text, CURL_ZERO_TERMINATED);
+
+    curl_easy_setopt(curl, CURLOPT_MIMEPOST, mime);
 	curl_easy_setopt(curl, CURLOPT_URL, url);
-	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, postfields);
 
 	// 执行请求
 	CURLcode res = curl_easy_perform(curl);
-	if (res != CURLE_OK) {
-		fprintf(stderr, "[ERROR] CURL perform failed in send_message: %s\n", curl_easy_strerror(res));
-	} else {
+	if (res == CURLE_OK) {
 		// 检查 HTTP 状态码
 		long http_code = 0;
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-		if (http_code != 200) {
-			fprintf(stderr, "[ERROR] Telegram API returned HTTP %ld in send_message\n", http_code);
-		} else {
+		if (http_code == 200) {
 			fprintf(stderr, "[INFO] Message sent successfully to chat_id %lld\n", chat_id);
+		} else {
+			fprintf(stderr, "[ERROR] Telegram API returned HTTP %ld in send_message\n", http_code);
 		}
+	} else {
+		fprintf(stderr, "[ERROR] CURL perform failed in send_message: %s\n", curl_easy_strerror(res));
 	}
+    curl_mime_free(mime);
 	curl_easy_cleanup(curl);
 
 	// 存到数据库，使用 prepared statement 防 SQL 注入
@@ -124,50 +130,12 @@ void send_message(long long chat_id, const char *text, sqlite3 *db, const char *
 	}
 	sqlite3_bind_int64(stmt, 1, chat_id);
 	sqlite3_bind_text(stmt, 2, text, -1, SQLITE_STATIC);
-	if (sqlite3_step(stmt) != SQLITE_DONE) {
-		fprintf(stderr, "[ERROR] Failed to execute SQL in send_message: %s\n", sqlite3_errmsg(db));
-	} else {
+	if (sqlite3_step(stmt) == SQLITE_DONE) {
 		fprintf(stderr, "[INFO] Message logged to DB for chat_id %lld\n", chat_id);
+	} else {
+		fprintf(stderr, "[ERROR] Failed to execute SQL in send_message: %s\n", sqlite3_errmsg(db));
 	}
 	sqlite3_finalize(stmt);
-}
-
-// 执行 CURL 请求函数：获取 URL 内容，支持 IPv4/6 和 headers
-char *perform_curl(const char *url, int ipv4, int ipv6, int include_headers) {
-	CURL *curl = init_curl_with_options();
-	if (!curl) return strdup("CURL init error!");
-
-	MemoryStruct chunk = {malloc(1), 0};
-	if (!chunk.memory) {
-		fprintf(stderr, "[ERROR] Failed to malloc in perform_curl\n");
-		curl_easy_cleanup(curl);
-		return strdup("Memory error!");
-	}
-
-	fprintf(stderr, "[INFO] Performing CURL to: %s (IPv4: %d, IPv6: %d, Headers: %d)\n", url, ipv4, ipv6, include_headers);
-
-	curl_easy_setopt(curl, CURLOPT_URL, url);
-	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_callback);
-	curl_easy_setopt(curl, CURLOPT_WRITEDATA, (void *)&chunk);
-
-	if (include_headers) curl_easy_setopt(curl, CURLOPT_HEADER, 1L);
-	if (ipv4) curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V4);
-	else if (ipv6) curl_easy_setopt(curl, CURLOPT_IPRESOLVE, CURL_IPRESOLVE_V6);
-
-	CURLcode res = curl_easy_perform(curl);
-	if (res != CURLE_OK) {
-		fprintf(stderr, "[ERROR] CURL perform failed: %s\n", curl_easy_strerror(res));
-		free(chunk.memory);
-		chunk.memory = strdup("CURL error!");
-	} else {
-		long http_code = 0;
-		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
-		if (http_code != 200) {
-			fprintf(stderr, "[WARNING] HTTP code %ld from %s\n", http_code, url);
-		}
-	}
-	curl_easy_cleanup(curl);
-	return chunk.memory;
 }
 
 // 处理更新函数：解析 Telegram 更新，处理消息并响应
@@ -234,67 +202,75 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		char info[256];
 		snprintf(info, sizeof(info), "Your ID: %lld\nYour Username: %s", user_id, username);
 		send_message(chat_id, info, db, token);
-	} else if (strncmp(text, "/curl ", 6) == 0) {
-		// 改进：使用 getopt 解析选项，支持组合如 -46, -i6
-		char *args = strdup(text + 6);
-		if (!args) {
-			fprintf(stderr, "[ERROR] strdup failed in /curl\n");
+	} else if (strncmp(text, "/cmd ", 5) == 0) {
+		// 仅管理员可用
+		if (user_id != MY_USER_ID) {
+			fprintf(stderr, "[WARN] Unauthorized access attempt from user %lld\n", user_id);
+			send_message(chat_id, "Sorry, this command is for owner only.", db, token);  // 可选回复
 			return;
 		}
 
-		int ipv4 = 0, ipv6 = 0, include_headers = 0;
-		char *url = NULL;
+		const char *cmd = NULL;
+		cmd = text + 5;
 
-		// TODO: 在Linux使用 getopt 解析
-		char *ptr = args;
-		while (*ptr) {
-			if (*ptr == ' ') {
-				ptr++;
-				continue;
-			}
-			if (*ptr == '-') {
-				ptr++;
-				while (*ptr && *ptr != ' ') {
-					if (*ptr == '4') ipv4 = 1;
-					else if (*ptr == '6') ipv6 = 1;
-					else if (*ptr == 'i') include_headers = 1;
-					else {
-						send_message(chat_id, "Invalid option! Usage: /curl https://example.com [-4] [-6] [-i]", db, token);
-						free(args);
-						return;
-					}
-					ptr++;
-				}
-			} else {
-				// 剩余部分作为URL
-				url = ptr;
-				while (*ptr) ptr++;  // 跳到末尾
-			}
-		}
-
-		if (!url || strlen(url) == 0) {
-			send_message(chat_id, "Usage: /curl https://example.com [-4] [-6] [-i]", db, token);
-			free(args);
+		// 简单过滤一些危险命令（但是不启用）
+		if (FALSE || strstr(cmd, "rm -rf /") || strstr(cmd, ":(){ :|:& };:") || strstr(cmd, "mkfs")) {
+			send_message(chat_id, "Meow~ That's too dangerous, master~", db, token);
 			return;
 		}
 
-		// 截断URL后的空格（如果有）
-		char *end = url + strlen(url) - 1;
-		while (end > url && *end == ' ') *end-- = '\0';
+		fprintf(stderr, "[INFO] Executing command for owner: %s\n", cmd);
 
-		char *response = perform_curl(url, ipv4, ipv6, include_headers);
-		// 截断响应如果太长（Telegram 消息限 4096 字符）
-		if (strlen(response) > 4000) {
-			response[4000] = '\0';
-			strcat(response, "... (truncated)");
+		// 执行命令并捕获输出
+		char *output = NULL;
+		size_t output_size = 0;
+		FILE *fp = popen(cmd, "r");
+		if (fp == NULL) {
+			send_message(chat_id, "popen failed :(", db, token);
+			return;
 		}
-		send_message(chat_id, response, db, token);
-		free(response);
-		free(args);
+
+		char buffer[1024];
+		while (fgets(buffer, sizeof(buffer), fp) != NULL) {
+			size_t len = strlen(buffer);
+			char *new_output = realloc(output, output_size + len + 1);
+			if (new_output == NULL) {
+				free(output);
+				pclose(fp);
+				send_message(chat_id, "Memory allocation failed", db, token);
+				return;
+			}
+			output = new_output;
+			memcpy(output + output_size, buffer, len);
+			output_size += len;
+			output[output_size] = '\0';
+		}
+		int exit_code = pclose(fp);
+		char status[256];
+#ifdef _WIN32
+		snprintf(status, sizeof(status), "Exit Code: %d\n", exit_code);
+#else
+		snprintf(status, sizeof(status), "Exit Code: %d\n", WEXITSTATUS(exit_code));
+#endif
+		send_message(chat_id, status, db, token);
+
+		if (output_size > 0) {
+			// Telegram 单条消息最多4096字符，超长就截断
+			if (output_size > 4000) {
+				memcpy(output + 4000 - 15, "\n... (truncated)", 16);
+				output[4000] = '\0';
+			}
+			send_message(chat_id, output, db, token);
+		}
+
+		if (output) free(output);
 	}
 }
 
 int main() {
+#ifdef _WIN32
+	system("chcp 65001");
+#endif
 	// 从环境变量获取 token
 	const char *token = getenv("TG_BOT_TOKEN");
 	if (token || *token) {
@@ -331,25 +307,13 @@ int main() {
 	long long offset = 0;
 	while (keep_running) {
 		CURL *curl = init_curl_with_options();
-		if (!curl) {
-#ifdef _WIN32
-			Sleep(2000);
-#else
-			sleep(2);
-#endif
-			continue;
-		}
+		if (!curl) goto loop_end;
 
 		MemoryStruct chunk = {malloc(1), 0};
 		if (!chunk.memory) {
 			fprintf(stderr, "[ERROR] Failed to malloc in main loop\n");
 			curl_easy_cleanup(curl);
-#ifdef _WIN32
-			Sleep(2000);
-#else
-			sleep(2);
-#endif
-			continue;
+			goto loop_end;
 		}
 
 		// 构建 getUpdates URL
@@ -394,6 +358,7 @@ int main() {
 		free(chunk.memory);
 		curl_easy_cleanup(curl);
 
+		loop_end:
 #ifdef _WIN32
 		int total_sleep_ms = POLL_INTERVAL * 1000;
 		while (total_sleep_ms > 0 && keep_running) {
