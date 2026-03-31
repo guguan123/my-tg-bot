@@ -245,14 +245,19 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 			output_size += len;
 			output[output_size] = '\0';
 		}
-		int exit_code = pclose(fp);
-		char status[256];
 #ifdef _WIN32
-		snprintf(status, sizeof(status), "Exit Code: %d\n", exit_code);
+		int exit_code = pclose(fp);
 #else
-		snprintf(status, sizeof(status), "Exit Code: %d\n", WEXITSTATUS(exit_code));
+		int pclose_result = pclose(fp);
+		int exit_code = WEXITSTATUS(pclose_result);
 #endif
-		send_message(chat_id, status, db, token);
+		char report_msg[64]; // 既然只是 Done(xxx)，不需要 256 那么大喵
+		if (exit_code == 0) {
+			snprintf(report_msg, sizeof(report_msg), "Done");
+		} else {
+			snprintf(report_msg, sizeof(report_msg), "Done(%d)", exit_code);
+		}
+		send_message(chat_id, report_msg, db, token);
 
 		if (output_size > 0) {
 			// Telegram 单条消息最多4096字符，超长就截断
