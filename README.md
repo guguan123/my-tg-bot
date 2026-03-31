@@ -3,11 +3,11 @@
 ## build
 
 ```bash
-gcc tg_bot.c -lcurl -lcjson -lsqlite3
+make
 ```
 
 ## run
 
 ```bash
-TG_BOT_TOKEN="<your key>" ./a.out
+TG_BOT_TOKEN="<your key>" ./tg_bot
 ```
