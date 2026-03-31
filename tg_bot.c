@@ -214,7 +214,7 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		cmd = text + 5;
 
 		// 简单过滤一些危险命令（但是不启用）
-		if (FALSE || strstr(cmd, "rm -rf /") || strstr(cmd, ":(){ :|:& };:") || strstr(cmd, "mkfs")) {
+		if (0 || strstr(cmd, "rm -rf /") || strstr(cmd, ":(){ :|:& };:") || strstr(cmd, "mkfs")) {
 			send_message(chat_id, "Meow~ That's too dangerous, master~", db, token);
 			return;
 		}
