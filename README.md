@@ -9,5 +9,5 @@ make
 ## run
 
 ```bash
-TG_BOT_TOKEN="<your key>" ./tg_bot
+TG_BOT_TOKEN="<your key>" build/tg_bot
 ```
