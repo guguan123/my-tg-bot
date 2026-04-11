@@ -200,7 +200,7 @@ void process_update(cJSON *update, sqlite3 *db, const char *token) {
 		send_message(chat_id, "Hello world", db, token);
 	} else if (strncmp(text, "/info", 5) == 0) {
 		char info[256];
-		snprintf(info, sizeof(info), "Your ID: %lld\nYour Username: %s", user_id, username);
+		snprintf(info, sizeof(info), "Chat ID: %lld\nYour ID: %lld\nYour Username: %s", chat_id, user_id, username);
 		send_message(chat_id, info, db, token);
 	} else if (strncmp(text, "/cmd ", 5) == 0) {
 		// 仅管理员可用
